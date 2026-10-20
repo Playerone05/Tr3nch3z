@@ -2,7 +2,7 @@
 
 A bot that estimates the chance each stock on your watchlist closes higher the next day, using price action, real news, and market context, and sends its calls to you on Telegram.
 
-**Current stage: Phase 3 (first model).** The bot collects data, scores headlines with FinBERT, builds features, trains a calibrated model, and answers `/today` and `/odds` in Telegram. The numbers are **not backtested yet** (that's Phase 4), so don't trade on them.
+**Current stage: Phase 4 (walk-forward backtest).** The bot collects data, scores headlines with FinBERT, builds features, trains a calibrated model, and backtests four different questions quarter by quarter since 2021. `/backtest` shows which ones have a real, out-of-sample signal. Don't trade on anything that isn't 🟢 there.
 
 > Not financial advice. This is a learning project. Paper trade for months before risking real money, and never use high multipliers.
 
@@ -70,6 +70,12 @@ python -m signalbot.model         # 4. check the model, retrain, predict tomorro
 python -m signalbot.bot           # run the Telegram bot (leave it running)
 ```
 
+Rerun the backtest whenever you change features or settings (takes 1–3 minutes):
+
+```bash
+python -m signalbot.backtest
+```
+
 Run steps 1–4 **after the market closes** (4:15 PM ET / 3:15 PM Central). Before that, today's prices are still moving and the odds aren't final. Or just send `/refresh` in Telegram, which runs all four.
 
 The first `sentiment` run downloads the model (~440 MB) and scores every stored headline, which can take 10–20 minutes on a laptop. It saves as it goes, so Ctrl+C is safe; the next run picks up where it stopped. After that, each run takes seconds.
@@ -86,10 +92,12 @@ To peek at the table: `python -m signalbot.features --show NVDA`
 | Terminal | `python -m signalbot.sentiment` | Score unscored headlines (`--limit 200` for a quick test) |
 | Terminal | `python -m signalbot.features --show NVDA` | Build features, print NVDA's latest rows |
 | Terminal | `python -m signalbot.model` | Held-out check, retrain, store tomorrow's odds |
+| Terminal | `python -m signalbot.backtest` | Walk-forward backtest of all four questions |
 | Terminal | `python -m signalbot.bot` | Run the Telegram bot |
 | Terminal | `python -m pytest` | Run the tests (offline, fake data) |
 | Telegram | `/today` | Tomorrow's odds for the whole watchlist |
 | Telegram | `/odds NVDA` | One stock's odds plus its key numbers |
+| Telegram | `/backtest` | Which questions show a real out-of-sample signal |
 | Telegram | `/status` | Data, sentiment, and feature coverage |
 | Telegram | `/refresh` | Pull data, score news, rebuild features, rerun the model |
 | Telegram | `/ping`, `/help` | Health check, command list |
@@ -111,6 +119,7 @@ One row per stock per trading day. Every column uses only what was public by tha
 | **Technical** (12) | 1/5/20-day returns, opening gap, RSI-14, MACD histogram, distance from 20/50-day averages, volume vs. 20-day average, ATR %, 20-day volatility, position in 20-day range |
 | **Market** (12) | SPY and QQQ moves, VIX level and change, sector ETF move, stock vs. sector and vs. SPY, 10-year yield and its 5-day change, yield curve (10-yr minus 3-month) |
 | **News** (9) | Headline count and how unusual it is, average/min/max FinBERT sentiment, share positive/negative, 3-day sentiment, stories focused on this stock |
+| **Peer rank** (7) | Where the stock ranks against the rest of the watchlist that day on 1/5/20-day return, RSI, distance from 20-day average, volume, and ATR |
 | **Calendar** (4) | Earnings reaction tomorrow, earnings reaction today, trading days to next earnings, day of week |
 
 **Label:** did the stock close higher the next trading day (1/0). The newest row has no label yet; it's the one the model will predict.
@@ -146,6 +155,28 @@ How to read the report:
 
 A single 120-day window is a small sample: a few points of edge either way can be luck. Phase 4 replays every past year to find out.
 
+## The backtest (Phase 4)
+
+`python -m signalbot.backtest` replays history quarter by quarter from 2021. For each quarter it trains only on earlier days (with a 5-day gap), calibrates on the latest 120 of them, and predicts the quarter. Every number in the report is out-of-sample.
+
+It tests four questions, because some are much easier than "up or down":
+
+| Question | Label | Why it might work |
+|---|---|---|
+| `direction` | closes higher tomorrow | the original question; the hardest |
+| `beat_peers` | beats the watchlist median tomorrow | removes the market's daily swing, which is most of the noise |
+| `big_move` | moves more than its 1-year median daily move, either way | volatility clusters, so move *size* is far more predictable than direction; matters for multiplier trades |
+| `direction_5d` | higher 5 trading days from now | slower signals have time to play out |
+
+How it decides:
+- **Baseline** = the up-rate of the most recent 120 days, the same days the model's calibration sees. Beating it means skill, not just following the trend.
+- **SIGNAL** = better probabilities (log loss) than the baseline in 95%+ of day-level bootstrap resamples, and AUC above 0.51. "Weak" = 80–95%.
+- The 5-day question resamples whole weeks, because its labels overlap.
+- **News** gets its own test on the days that have news: each quarter's news add-on learns only from earlier quarters' out-of-sample predictions.
+- `beat_peers` also reports a **top-2 minus bottom-2 spread**: each day, the average next-day return of the model's 2 top picks minus its 2 bottom picks, before costs.
+
+Sanity checks in `tests/test_backtest.py`: a planted signal is found, pure noise is never called a signal, and no fold trains on its test window or the 5-day gap before it.
+
 ## Project layout
 
 ```
@@ -161,6 +192,7 @@ signalbot/
   sentiment.py         FinBERT headline scoring
   features.py          builds the feature table
   model.py             trains, checks, and runs the model
+  backtest.py          walk-forward backtest of four questions
   bot.py               Telegram bot
   chat_id.py           finds your Telegram chat ID
   notify.py            one-off Telegram messages
@@ -171,8 +203,8 @@ tests/                 runs offline with fake data
 
 1. ~~Data pipeline~~
 2. ~~Features & sentiment~~
-3. **First model** ← you are here
-4. Honest backtest: walk-forward testing, leakage checks, scorecard vs. the base rate
+3. ~~First model~~
+4. **Honest backtest** ← you are here: walk-forward testing, leakage checks, scorecard vs. the base rate
 5. Paper trading: nightly run, `/today`, `/odds`, `/log`, `/record` commands, 3+ months of logged calls
 6. Report & polish: AI news summaries, dashboard, portfolio write-up
 

@@ -33,12 +33,15 @@ CONTEXT = [
     "spy_ret_1d", "spy_ret_5d", "qqq_ret_1d", "vix", "vix_chg_1d", "vix_vs_20d",
     "sector_ret_1d", "rel_sector_5d", "rel_spy_5d", "tnx", "tnx_chg_5d", "curve",
 ]
+# Where each stock ranks against the rest of the watchlist that day (0 = lowest, 1 = highest).
+XS_SOURCES = ["ret_1d", "ret_5d", "ret_20d", "rsi_14", "dist_sma20", "vol_ratio_20", "atr_pct_14"]
+XS = [f"xs_{c}" for c in XS_SOURCES]
 NEWS = [
     "news_n", "news_n_ratio", "news_sent", "news_sent_min", "news_sent_max",
     "news_pos_share", "news_neg_share", "news_sent_3d", "news_focus_n",
 ]
 EVENTS = ["earn_next", "earn_today", "days_to_earn", "dow"]
-FEATURES = TECH + CONTEXT + NEWS + EVENTS
+FEATURES = TECH + CONTEXT + XS + NEWS + EVENTS
 LABEL = "label_up"
 
 
@@ -107,11 +110,14 @@ def technicals(p: pd.DataFrame) -> pd.DataFrame:
     tr = pd.concat([h - l, (h - prev).abs(), (l - prev).abs()], axis=1).max(axis=1)
     out["atr_pct_14"] = tr.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean() / c
     out["volat_20"] = out["ret_1d"].rolling(20).std()
+    # A steady yardstick for "a normal day's move": median absolute move over the past year.
+    out["usual_move"] = out["ret_1d"].abs().rolling(250, min_periods=120).median()
     lo, hi = l.rolling(20).min(), h.rolling(20).max()
     out["range_pos_20"] = (c - lo) / (hi - lo).replace(0, np.nan)
 
     nxt = c.shift(-1)
     out["next_ret"] = nxt / c - 1
+    out["next_ret_5"] = c.shift(-5) / c - 1
     out[LABEL] = np.where(nxt.isna(), np.nan, (nxt > c).astype(float))
     return out
 
@@ -243,7 +249,7 @@ def add_earnings(feat: pd.DataFrame, earnings: pd.DataFrame, days: pd.DatetimeIn
 
 def build_features(prices: pd.DataFrame, news: pd.DataFrame, earnings: pd.DataFrame, s: Settings) -> pd.DataFrame:
     if prices.empty:
-        return pd.DataFrame(columns=["ticker", "date", *FEATURES, "next_ret", LABEL])
+        return pd.DataFrame(columns=["ticker", "date", *FEATURES, "next_ret", "next_ret_5", LABEL])
     ctx, wide = market_context(prices)
     days = pd.DatetimeIndex(sorted(prices.loc[prices["ticker"] == MARKET, "date"].unique()))
     if days.empty:
@@ -272,13 +278,15 @@ def build_features(prices: pd.DataFrame, news: pd.DataFrame, earnings: pd.DataFr
     feat = pd.concat(parts, ignore_index=True)
     feat = feat[feat["date"].isin(days)].copy()   # market sessions only
     feat["dow"] = feat["date"].dt.dayofweek.astype(float)
+    for src, dst in zip(XS_SOURCES, XS):
+        feat[dst] = feat.groupby("date")[src].rank(pct=True)
 
     daily = news_daily(news)
     start = news["date"].min() if not news.empty else None
     feat = add_news(feat, daily, start)
     feat = add_earnings(feat, earnings, days)
 
-    cols = ["ticker", "date", "close", *FEATURES, "news_covered", "next_ret", LABEL]
+    cols = ["ticker", "date", "close", *FEATURES, "news_covered", "usual_move", "next_ret", "next_ret_5", LABEL]
     return feat[cols].sort_values(["date", "ticker"]).reset_index(drop=True)
 
 
@@ -292,7 +300,7 @@ def save(conn, feat: pd.DataFrame) -> None:
 
 def report(feat: pd.DataFrame, scored: int, total: int) -> str:
     labeled = feat[LABEL].notna()
-    usable = labeled & feat[TECH + CONTEXT].notna().all(axis=1)
+    usable = labeled & feat[TECH + CONTEXT + XS].notna().all(axis=1)
     with_news = usable & (feat["news_covered"] == 1)
     up = feat.loc[labeled, LABEL].mean() if labeled.any() else float("nan")
     latest = feat["date"].max()
@@ -300,7 +308,7 @@ def report(feat: pd.DataFrame, scored: int, total: int) -> str:
         f"Feature table: {len(feat):,} rows, {feat['ticker'].nunique()} stocks, "
         f"{feat['date'].min():%Y-%m-%d} to {latest:%Y-%m-%d}",
         f"  {len(FEATURES)} features: {len(TECH)} technical, {len(CONTEXT)} market, "
-        f"{len(NEWS)} news, {len(EVENTS)} calendar",
+        f"{len(XS)} peer-rank, {len(NEWS)} news, {len(EVENTS)} calendar",
         f"  rows ready for training:  {usable.sum():,}  ({with_news.sum():,} with news coverage)",
         f"  rows to predict (no label yet): {int((~labeled).sum())}  (latest day {latest:%Y-%m-%d})",
         f"  base rate: stocks closed up the next day {up:.1%} of the time  <- the number to beat",

@@ -37,9 +37,9 @@ from sklearn.preprocessing import StandardScaler
 
 from . import db
 from .config import Settings, load_settings
-from .features import CONTEXT, EVENTS, LABEL, NEWS, TECH
+from .features import CONTEXT, EVENTS, LABEL, NEWS, TECH, XS
 
-BASE_FEATURES = TECH + CONTEXT + EVENTS
+BASE_FEATURES = TECH + CONTEXT + XS + EVENTS
 CALL_UP, CALL_DOWN = 0.58, 0.42        # decision rule from the Signal Map
 EMBARGO_DAYS = 5                        # gap between train and test so nothing bleeds across
 EPS = 1e-4
@@ -110,14 +110,15 @@ def usable_features(features: list[str], train: pd.DataFrame) -> list[str]:
     return [c for c in features if train[c].nunique(dropna=True) > 1]
 
 
-def fit_calibrated(name: str, features: list[str], train: pd.DataFrame, cal: pd.DataFrame) -> Calibrated:
+def fit_calibrated(name: str, features: list[str], train: pd.DataFrame, cal: pd.DataFrame,
+                   label: str = LABEL) -> Calibrated:
     features = usable_features(features, train)
     m = MODELS[name]()
-    m.fit(train[features], train[LABEL].astype(int))
+    m.fit(train[features], train[label].astype(int))
     c = Calibrated(name, features, m)
-    if len(cal) >= 200 and cal[LABEL].nunique() == 2:
+    if len(cal) >= 200 and cal[label].nunique() == 2:
         platt = LogisticRegression(C=1.0)
-        platt.fit(logit(c.raw(cal)).reshape(-1, 1), cal[LABEL].astype(int))
+        platt.fit(logit(c.raw(cal)).reshape(-1, 1), cal[label].astype(int))
         c.a, c.b = float(platt.coef_[0, 0]), float(platt.intercept_[0])
     return c
 
@@ -131,8 +132,7 @@ class NewsAddOn:
 
     @staticmethod
     def inputs(base: Calibrated, X: pd.DataFrame) -> np.ndarray:
-        news = X[NEWS].fillna(0.0).to_numpy()
-        return np.column_stack([logit(base.predict(X)), news])
+        return addon_inputs(base.predict(X), X)
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         out = self.base.predict(X)
@@ -143,10 +143,29 @@ class NewsAddOn:
         return out
 
 
-def fit_news_addon(base_for_inputs: Calibrated, base_live: Calibrated, rows: pd.DataFrame) -> NewsAddOn:
-    m = make_pipeline(StandardScaler(), LogisticRegression(C=0.05, max_iter=2000))
-    m.fit(NewsAddOn.inputs(base_for_inputs, rows), rows[LABEL].astype(int))
-    return NewsAddOn(base_live, m)
+COUNT_COLUMNS = {"news_n", "news_focus_n", "news_n_ratio"}
+
+
+def addon_inputs(p_base: np.ndarray, X: pd.DataFrame) -> np.ndarray:
+    """Base model's log-odds plus news columns. Counts are log-scaled so one huge
+    news day (hundreds of headlines) can't dominate."""
+    cols = []
+    for c in NEWS:
+        v = X[c].fillna(0.0).to_numpy(dtype=float)
+        cols.append(np.log1p(np.clip(v, 0, None)) if c in COUNT_COLUMNS else v)
+    return np.column_stack([logit(p_base), *cols])
+
+
+def make_addon_model():
+    return make_pipeline(StandardScaler(), LogisticRegression(C=0.05, max_iter=2000))
+
+
+def fit_news_addon(base: Calibrated, rows: pd.DataFrame) -> NewsAddOn:
+    """Train and predict with the SAME base model. (Phase 3 trained with one base model
+    and predicted with another; the mismatch stretched its inputs and made it overconfident.)"""
+    m = make_addon_model()
+    m.fit(NewsAddOn.inputs(base, rows), rows[LABEL].astype(int))
+    return NewsAddOn(base, m)
 
 
 # ---------------------------------------------------------------- scoring
@@ -262,7 +281,7 @@ def evaluate(feat: pd.DataFrame, test_days: int = 120, cal_days: int = 120, seed
         pre_cal = pre[pre["date"] >= pre["date"].max() - pd.Timedelta(days=180)]
         pre_train = pre[pre["date"] < pre_cal["date"].min()]
         base_inputs = fit_calibrated(best, BASE_FEATURES, pre_train, pre_cal)
-        addon = fit_news_addon(base_inputs, fitted[best], news_train)
+        addon = fit_news_addon(base_inputs, news_train)
         yn = news_test[LABEL].astype(int).to_numpy()
         p_without = fitted[best].predict(news_test)
         p_with = addon.predict(news_test)
@@ -307,7 +326,7 @@ def train_final(feat: pd.DataFrame, ev: Evaluation, cal_days: int = 120):
     pre = labeled[labeled["date"] < first_news - pd.Timedelta(days=EMBARGO_DAYS + 2)]
     pre_cal = pre[pre["date"] >= pre["date"].max() - pd.Timedelta(days=180)]
     base_inputs = fit_calibrated(ev.winner, BASE_FEATURES, pre[pre["date"] < pre_cal["date"].min()], pre_cal)
-    return fit_news_addon(base_inputs, base, covered), f"{ev.winner}+news"
+    return fit_news_addon(base_inputs, covered), f"{ev.winner}+news"
 
 
 def predict_latest(model, feat: pd.DataFrame) -> pd.DataFrame:
@@ -360,7 +379,7 @@ def format_report(ev: Evaluation) -> str:
         vs = r["log_loss_base"] - r["log_loss"]
         L.append(f"  {name:<24}{r['rows']:>6}{r['accuracy']:>10.1%}{r['always_up']:>11.1%}"
                  f"{r['edge_pts']:>+7.1f}p{r['log_loss']:>10.4f}{vs:>+9.4f}{r['calls']:>7}"
-                 f"{r['call_accuracy']:>10.1%}")
+                 + (f"{r['call_accuracy']:>10.1%}" if r["calls"] else f"{'—':>10}"))
     L += [
         "",
         "  edge = accuracy minus the better of always-up / always-down, in points",

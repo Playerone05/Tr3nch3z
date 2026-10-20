@@ -7,7 +7,7 @@ import pytest
 from signalbot import db
 from signalbot.config import Settings
 from signalbot.features import (
-    CONTEXT, FEATURES, LABEL, NEWS, TECH, add_earnings, build_features, load_news, news_daily, rsi, technicals,
+    CONTEXT, FEATURES, LABEL, NEWS, TECH, XS, add_earnings, build_features, load_news, news_daily, rsi, technicals,
 )
 from signalbot.sentiment import score_stories
 
@@ -77,7 +77,7 @@ def test_changing_future_prices_never_changes_past_features():
     shocked.loc[future, "volume"] *= 10
     after = build_features(shocked, empty_news(), empty_earnings(), settings())
 
-    cols = TECH + CONTEXT
+    cols = TECH + CONTEXT + XS
     past_a = base[base["date"] <= cut].set_index(["ticker", "date"])[cols]
     past_b = after[after["date"] <= cut].set_index(["ticker", "date"])[cols]
     pd.testing.assert_frame_equal(past_a, past_b)
@@ -94,7 +94,9 @@ def test_feature_table_shape_and_context():
     assert set(FEATURES).issubset(feat.columns)
     last = feat[feat["date"] == feat["date"].max()]
     assert last[LABEL].isna().all()                         # newest day is the one to predict
-    ready = feat.dropna(subset=TECH + CONTEXT + [LABEL])
+    ready = feat.dropna(subset=TECH + CONTEXT + XS + [LABEL])
+    # Peer ranks run 0..1 within each day
+    assert feat.groupby("date")["xs_ret_1d"].max().dropna().eq(1.0).all()
     assert len(ready) > 100
     # BBB has no sector entry, so it's compared to SPY
     row = feat[(feat["ticker"] == "BBB")].dropna(subset=["sector_ret_1d"]).iloc[-1]

@@ -31,6 +31,7 @@ log = logging.getLogger("signalbot")
 COMMANDS = [
     ("today", "Tomorrow's odds for the watchlist"),
     ("odds", "Odds and key numbers for one stock, e.g. /odds NVDA"),
+    ("backtest", "Results of the last walk-forward backtest"),
     ("status", "What data the bot has"),
     ("refresh", "Pull new data, rebuild features, rerun the model"),
     ("ping", "Check the bot is alive"),
@@ -135,6 +136,36 @@ def odds_text(s: Settings, ticker: str) -> str:
     return "\n".join(lines)
 
 
+def backtest_text(s: Settings) -> str:
+    import json
+    conn = db.connect(s.database_path)
+    try:
+        has = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='backtest_runs'").fetchone()
+        row = conn.execute(
+            "SELECT created_at, params, summary FROM backtest_runs ORDER BY id DESC LIMIT 1").fetchone() if has else None
+    finally:
+        conn.close()
+    if not row:
+        return "No backtest yet. Run <code>python -m signalbot.backtest</code> (about 1-3 minutes)."
+    params, summary = json.loads(row[1]), json.loads(row[2])
+    icon = {"signal": "🟢", "weak": "🟡", "none": "⚪"}
+    word = {"signal": "signal", "weak": "weak", "none": "no signal"}
+    lines = [f"<b>Backtest</b> {escape(params['start'])} → {escape(params['end'])}", "<i>all out-of-sample</i>", ""]
+    for target, block in summary["targets"].items():
+        r = block["results"][block["best"]]
+        lines.append(f"{icon[r['verdict']]} <b>{escape(target)}</b>: {word[r['verdict']]}")
+        lines.append(f"   edge {r['edge_pts']:+.1f}p ({r['edge_lo']:+.1f} to {r['edge_hi']:+.1f}) · "
+                     f"AUC {r['auc']:.3f} · {escape(block['best'])}")
+        ex = r.get("extra", {})
+        if "spread_bps_per_day" in ex:
+            lines.append(f"   top-2 minus bottom-2: {ex['spread_bps_per_day']:+.1f} bps/day")
+        n = summary.get("news", {}).get(target)
+        if n:
+            lines.append(f"   + news: {escape(n['verdict'])} ({n['win_share']:.0%})")
+    lines += ["", "🟢 = beats the base rate in 95%+ of resamples"]
+    return "\n".join(lines)
+
+
 def build_app(s: Settings) -> Application:
     app = Application.builder().token(s.telegram_bot_token).build()
     owner = filters.Chat(chat_id=int(s.telegram_chat_id)) if s.telegram_chat_id else None
@@ -182,6 +213,9 @@ def build_app(s: Settings) -> Application:
     async def today(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(today_text(s), parse_mode=ParseMode.HTML)
 
+    async def backtest(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        await update.message.reply_text(backtest_text(s), parse_mode=ParseMode.HTML)
+
     async def odds(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not ctx.args:
             await update.message.reply_text("Which stock? For example: /odds NVDA")
@@ -200,6 +234,7 @@ def build_app(s: Settings) -> Application:
         app.add_handler(CommandHandler("help", help_cmd, filters=owner))
         app.add_handler(CommandHandler("today", today, filters=owner))
         app.add_handler(CommandHandler("odds", odds, filters=owner))
+        app.add_handler(CommandHandler("backtest", backtest, filters=owner))
         app.add_handler(CommandHandler("ping", ping, filters=owner))
         app.add_handler(CommandHandler("status", status, filters=owner))
         app.add_handler(CommandHandler("refresh", refresh, filters=owner))

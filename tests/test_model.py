@@ -54,7 +54,7 @@ def test_finds_planted_signal_and_calibrates():
 def test_pure_noise_shows_no_edge():
     ev = evaluate(synthetic_features(signal=0.0))
     for name in ("logistic", "trees"):
-        assert abs(ev.results[name]["edge_pts"]) < 6
+        assert ev.results[name]["edge_pts"] < 3      # noise must never look like an edge
     assert not ev.use_news
 
 

@@ -1,0 +1,40 @@
+# Signal Bot settings. Edit freely; no code changes needed.
+
+# Stocks the bot makes calls on.
+watchlist:
+  - AAPL
+  - MSFT
+  - NVDA
+  - AMZN
+  - GOOGL
+  - META
+  - TSLA
+  - AMD
+  - JPM
+  - XOM
+
+# Market context: the whole market, volatility, and sectors.
+# These get price history only (no news).
+context:
+  - SPY      # S&P 500
+  - QQQ      # Nasdaq 100
+  - ^VIX     # volatility index (Yahoo symbol)
+  - XLK      # tech
+  - XLF      # financials
+  - XLE      # energy
+  - XLY      # consumer discretionary
+  - XLC      # communication services
+
+# How far back to pull price history on the first run.
+history_start: "2019-01-01"
+
+# How far back to pull news on the first run (free news tiers limit history).
+news_lookback_days: 365
+
+# News published after this time (US Eastern) counts toward the NEXT trading day,
+# so the model never sees news that came out after the close it's predicting from.
+market_timezone: "America/New_York"
+news_cutoff: "16:00"
+
+# Where the local database lives (ignored by git).
+database_path: "data/signalbot.db"

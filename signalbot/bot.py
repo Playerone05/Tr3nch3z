@@ -20,6 +20,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 from . import db
 from .config import ROOT, Settings, load_settings
 from .notify import escape
+from .sentiment import coverage as sentiment_coverage
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
 # httpx logs every request URL, and those URLs contain the bot token. Keep it quiet.
@@ -38,6 +39,10 @@ def status_text(s: Settings) -> str:
     conn = db.connect(s.database_path)
     try:
         sm = db.summary(conn)
+        scored, total = sentiment_coverage(conn)
+        has_feat = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='features'").fetchone()
+        feat = conn.execute("SELECT COUNT(*), MAX(date) FROM features").fetchone() if has_feat else (0, None)
     finally:
         conn.close()
     if not sm["price_rows"]:
@@ -48,7 +53,9 @@ def status_text(s: Settings) -> str:
         f"  {escape(sm['price_from'])} → {escape(sm['price_to'])}",
         f"News: {sm['news_rows']:,} stories · {sm['news_tickers']} tickers",
         f"  {escape(sm['news_from'] or '—')} → {escape(sm['news_to'] or '—')}",
+        f"Headlines scored: {scored:,} of {total:,}",
         f"Earnings dates: {sm['earnings_rows']}",
+        f"Feature rows: {feat[0]:,} (through {escape(feat[1] or '—')})",
         f"Last refresh: {escape(sm['last_refresh'] or 'never')} (UTC)",
         f"Watchlist: {escape(', '.join(s.watchlist))}",
     ])
@@ -83,11 +90,14 @@ def build_app(s: Settings) -> Application:
 
     async def refresh(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Refreshing data. This can take a few minutes on the first run...")
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-m", "signalbot.refresh", "--notify",
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, cwd=str(ROOT),
-        )
-        code = await proc.wait()
+        code = 0
+        for module, extra in (("signalbot.refresh", ["--notify"]), ("signalbot.features", [])):
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", module, *extra,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, cwd=str(ROOT),
+            )
+            rc = await proc.wait()
+            code = code or rc
         if code != 0:
             await update.message.reply_text("Refresh finished with errors. Run it in the terminal to see details.")
 

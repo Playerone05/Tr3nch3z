@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 class Settings:
     watchlist: list[str]
     context: list[str] = field(default_factory=list)
+    sectors: dict[str, str] = field(default_factory=dict)
     history_start: str = "2019-01-01"
     news_lookback_days: int = 365
     market_timezone: str = "America/New_York"
@@ -73,6 +74,7 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
     return Settings(
         watchlist=watchlist,
         context=[str(t).upper().strip() for t in raw.get("context", [])],
+        sectors={str(k).upper(): str(v).upper() for k, v in (raw.get("sectors") or {}).items()},
         history_start=str(raw.get("history_start", "2019-01-01")),
         news_lookback_days=int(raw.get("news_lookback_days", 365)),
         market_timezone=str(raw.get("market_timezone", "America/New_York")),

@@ -24,6 +24,22 @@ context:
   - XLE      # energy
   - XLY      # consumer discretionary
   - XLC      # communication services
+  - ^TNX     # 10-year Treasury yield
+  - ^IRX     # 3-month Treasury bill yield
+
+# Which sector ETF each watchlist stock is compared against.
+# Any stock not listed here is compared against SPY.
+sectors:
+  AAPL: XLK
+  MSFT: XLK
+  NVDA: XLK
+  AMD: XLK
+  AMZN: XLY
+  TSLA: XLY
+  GOOGL: XLC
+  META: XLC
+  JPM: XLF
+  XOM: XLE
 
 # How far back to pull price history on the first run.
 history_start: "2019-01-01"

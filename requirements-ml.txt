@@ -1,0 +1,6 @@
+# Extra packages for FinBERT news sentiment (Phase 2).
+# Install PyTorch's smaller CPU-only build FIRST:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+# then:
+#   pip install -r requirements-ml.txt
+transformers>=4.40

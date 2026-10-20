@@ -36,6 +36,7 @@ COMMANDS = [
     ("call", "Trench call for one market, e.g. /call NVDA or /call btc"),
     ("scan", "Check every Trench market for a setup right now"),
     ("tested", "What the backtest says works, by market and hold time"),
+    ("chart", "Picture of how the bot's calls did in the backtest"),
     ("today", "Next-day outlook (daily model)"),
     ("status", "What data the bot has"),
     ("help", "List commands"),
@@ -306,6 +307,23 @@ def build_app(s: Settings) -> Application:
             parts.append(f"⚪ No trade: {escape(', '.join(quiet))}")
         await update.message.reply_text("\n\n".join(parts), parse_mode=ParseMode.HTML)
 
+    async def chart(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        from .intraday import load_models, load_oos, trench_settings
+        from .report import CHART_PATH, trench_chart
+        art = load_models()
+        if art is None:
+            await update.message.reply_text("No Trench backtest yet. Run: python -m signalbot.intraday backtest")
+            return
+        if not CHART_PATH.exists() or CHART_PATH.stat().st_mtime < (ROOT / "data" / "intraday_models.joblib").stat().st_mtime:
+            oos = load_oos()
+            if oos is None:
+                await update.message.reply_text("Backtest results are missing. Rerun the intraday backtest.")
+                return
+            await asyncio.to_thread(trench_chart, oos, art["plan"], trench_settings(s))
+        with open(CHART_PATH, "rb") as fh:
+            await update.message.reply_photo(fh, caption="Trench backtest. Every prediction out-of-sample. "
+                                                         "Send /tested for the numbers.")
+
     async def tested(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(tested_text(s), parse_mode=ParseMode.HTML)
 
@@ -334,6 +352,7 @@ def build_app(s: Settings) -> Application:
         app.add_handler(CommandHandler("call", call, filters=owner))
         app.add_handler(CommandHandler("scan", scan, filters=owner))
         app.add_handler(CommandHandler("tested", tested, filters=owner))
+        app.add_handler(CommandHandler("chart", chart, filters=owner))
         app.add_handler(CommandHandler("ping", ping, filters=owner))
         app.add_handler(CommandHandler("status", status, filters=owner))
         app.add_handler(CommandHandler("refresh", refresh, filters=owner))

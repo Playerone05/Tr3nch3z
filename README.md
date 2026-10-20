@@ -15,6 +15,14 @@ python -m signalbot.bot                    # then in Telegram: /call NVDA, /call
 
 Rerun `refresh` + `backtest` about once a week so the models keep up with the market.
 
+**See how it did:** every backtest also draws a chart, saved to `data/trench_backtest.png`. Open it with `xdg-open data/trench_backtest.png`, or send `/chart` in Telegram. It shows:
+- the running total if you'd bet the same stake on every call (each market type at its best hold), with a line marking where the confidence bar was picked versus judged
+- how often calls were right, by hold time
+- the average move in your favor per call, with its 90% range and your fee line
+- whether "X% confident" really meant X% (calibration)
+
+Redraw it any time with `python -m signalbot.report`.
+
 **Set up for your trades in `config.yaml` → `trench:`**
 
 | Setting | What it is |
@@ -140,6 +148,7 @@ To peek at the table: `python -m signalbot.features --show NVDA`
 | Terminal | `python -m pytest` | Run the tests (offline, fake data) |
 | Telegram | `/call NVDA` | Trench call: UP / DOWN / No trade, hold time, reasons |
 | Telegram | `/scan` | Every Trench market right now |
+| Telegram | `/chart` | Picture of the Trench backtest |
 | Telegram | `/tested` | Which market types and hold times have a tested edge |
 | Telegram | `/today` | Tomorrow's odds for the whole watchlist |
 | Telegram | `/odds NVDA` | One stock's odds plus its key numbers |
@@ -240,6 +249,7 @@ signalbot/
   model.py             trains, checks, and runs the model
   backtest.py          walk-forward backtest of four questions (daily)
   intraday.py          Trench mode: minute features, 1-5 min backtest, live calls
+  report.py            backtest chart (data/trench_backtest.png)
   sources/bars.py      Alpaca minute bars (stocks + crypto)
   bot.py               Telegram bot
   chat_id.py           finds your Telegram chat ID

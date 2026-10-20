@@ -44,6 +44,7 @@ TRAIN_WEEKS = 6
 MIN_CALLS = 40
 TRAIN_CAP = 150_000                    # max rows per model fit (keeps a laptop run to minutes)
 MODEL_PATH = ROOT / "data" / "intraday_models.joblib"
+OOS_PATH = ROOT / "data" / "intraday_oos.joblib"
 
 FEATURES = [
     "r1", "r3", "r5", "r15", "r30", "r60", "rv30", "vol5_ratio", "range_pos30", "vwap60_dist",
@@ -407,20 +408,26 @@ def fit_hold(train: pd.DataFrame, cal: pd.DataFrame, hold: int, cap: int | None 
 
 # ---------------------------------------------------------------- trade math
 
-def trade_stats(p, fwd, mae_long, mae_short, days, delta: float, mult: float, fee_bps: float | None,
-                seed: int = 0) -> dict:
-    """What would have happened trading every call at this confidence level."""
+def per_trade(p, fwd, mae_long, mae_short, delta: float, mult: float, fee_bps: float | None):
+    """For every call at this confidence: (mask of calls, bps in your favor, busted?, result on stake)."""
     p, fwd = np.asarray(p, float), np.asarray(fwd, float)
     call = np.abs(p - 0.5) >= delta
-    n = int(call.sum())
-    if n == 0:
-        return {"n": 0}
     d = np.where(p[call] > 0.5, 1.0, -1.0)
     gross = d * fwd[call] * 1e4                                   # bps of position in your favor
     adverse = np.where(d > 0, -np.asarray(mae_long, float)[call], np.asarray(mae_short, float)[call])
     bust = adverse >= 1.0 / mult
     fee = fee_bps or 0.0
     stake = np.where(bust, -1.0, np.maximum(mult * (gross - fee) / 1e4, -1.0))
+    return call, gross, bust, stake
+
+
+def trade_stats(p, fwd, mae_long, mae_short, days, delta: float, mult: float, fee_bps: float | None,
+                seed: int = 0) -> dict:
+    """What would have happened trading every call at this confidence level."""
+    call, gross, bust, stake = per_trade(p, fwd, mae_long, mae_short, delta, mult, fee_bps)
+    n = int(call.sum())
+    if n == 0:
+        return {"n": 0}
     dd = np.asarray(days)[call]
     g = pd.Series(gross).groupby(pd.Series(dd)).agg(["sum", "count"])
     idx = np.random.default_rng(seed).integers(0, len(g), size=(1000, len(g)))
@@ -567,6 +574,27 @@ def save_models(models: dict, plan: dict, scales: dict, t: Trench) -> None:
     MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump({"models": models, "plan": plan, "scales": scales, "created_at": db.now_utc(),
                  "multiplier": t.multiplier, "fee_bps": t.fee_bps}, MODEL_PATH)
+
+
+def save_oos(oos: pd.DataFrame) -> None:
+    import joblib
+    o = oos.drop(columns=["ts"]).copy()
+    for c in ("p", "fwd", "mae_long", "mae_short"):
+        o[c] = o[c].astype("float32")
+    for c in ("ticker", "kind", "day"):
+        o[c] = o[c].astype("category")
+    OOS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(o, OOS_PATH, compress=3)
+
+
+def load_oos() -> pd.DataFrame | None:
+    import joblib
+    if not OOS_PATH.exists():
+        return None
+    o = joblib.load(OOS_PATH)
+    for c in ("ticker", "kind", "day"):
+        o[c] = o[c].astype(str)
+    return o
 
 
 def load_models():
@@ -753,6 +781,13 @@ def main(argv=None) -> int:
         plan = plan_from_oos(oos, t)
         print()
         print(format_plan(plan, t, oos["day"].min(), oos["day"].max()))
+        save_oos(oos)
+        try:
+            from .report import trench_chart
+            path = trench_chart(oos, plan, t)
+            print(f"\nChart saved: {path}  (open it with: xdg-open {path.relative_to(ROOT)})")
+        except Exception as exc:
+            print(f"\nCouldn't draw the chart: {exc}")
         print("\nTraining live models on the latest weeks...", flush=True)
         save_models(train_live(df, t), plan, feature_scales(df), t)
         conn.executescript(BARS_SCHEMA)

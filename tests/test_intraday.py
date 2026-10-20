@@ -124,9 +124,16 @@ def test_planted_momentum_is_found_and_noise_is_not():
 
 def test_live_call_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setattr(ix, "MODEL_PATH", tmp_path / "m.joblib")
+    monkeypatch.setattr(ix, "OOS_PATH", tmp_path / "oos.joblib")
     df, oos, plan = _backtest(momentum=0.6)
     ix.save_models(ix.train_live(df, T), plan, ix.feature_scales(df), T)
     art = ix.load_models()
+
+    # The chart draws from the saved out-of-sample results
+    from signalbot.report import trench_chart
+    ix.save_oos(oos)
+    png = trench_chart(ix.load_oos(), plan, T, tmp_path / "c.png")
+    assert png.exists() and png.stat().st_size > 20_000
 
     bars = synth_bars(n_days=1, momentum=0.6, seed=5, start="2026-09-01")
     now = pd.Timestamp("2026-09-01 15:00", tz="America/New_York").tz_convert("UTC")

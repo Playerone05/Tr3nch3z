@@ -23,6 +23,8 @@ class Settings:
     news_cutoff: str = "16:00"
     database_path: Path = ROOT / "data" / "signalbot.db"
 
+    trench: dict = field(default_factory=dict)
+
     # Secrets (from .env). None means "not set".
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
@@ -80,6 +82,7 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
         market_timezone=str(raw.get("market_timezone", "America/New_York")),
         news_cutoff=str(raw.get("news_cutoff", "16:00")),
         database_path=db_path,
+        trench=raw.get("trench") or {},
         telegram_bot_token=_env("TELEGRAM_BOT_TOKEN"),
         telegram_chat_id=_env("TELEGRAM_CHAT_ID"),
         alpaca_api_key=_env("ALPACA_API_KEY"),

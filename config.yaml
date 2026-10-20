@@ -54,3 +54,23 @@ news_cutoff: "16:00"
 
 # Where the local database lives (ignored by git).
 database_path: "data/signalbot.db"
+
+# ---------------------------------------------------------------- Trench (intraday)
+# Settings for 1-5 minute calls, matched to how Trench trades.
+trench:
+  multiplier: 25        # the multiplier you usually use (results are shown at this)
+  fee_bps: null         # Trench's fee per trade, as basis points of the position (1 bp = 0.01%).
+                        # Read it off a real ticket: fee $ / (stake $ x multiplier) x 10000.
+                        # Leave null until you know it; the bot then shows the max fee each call survives.
+  entry_delay_min: 1    # minutes between the alert and you placing the trade
+  holds: [1, 2, 3, 5]   # hold times (minutes) the bot chooses between
+  history_days: 120     # how much minute history to learn from
+  feed: iex             # Alpaca's free real-time stock feed
+  markets:
+    stocks: [AAPL, MSFT, NVDA, AMZN, META, TSLA]
+    crypto: [BTC/USD, ETH/USD, SOL/USD]
+    commodities:        # ETFs that track the commodity; US market hours only
+      GLD: gold
+      SLV: silver
+      USO: oil
+  context: [SPY, QQQ]   # market mood for stocks and commodities (BTC/USD is used for crypto)

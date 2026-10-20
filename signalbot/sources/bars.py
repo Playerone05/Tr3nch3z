@@ -16,6 +16,7 @@ import requests
 from .news import TIMEOUT, SourceError, _check
 
 ALPACA_BARS_URL = "https://data.alpaca.markets/v2/stocks/bars"
+ALPACA_CRYPTO_BARS_URL = "https://data.alpaca.markets/v1beta3/crypto/us/bars"
 BAR_COLUMNS = ["ticker", "ts", "open", "high", "low", "close", "volume", "vwap", "trades"]
 
 
@@ -31,19 +32,22 @@ def fetch_minute_bars(
     max_pages: int = 2000,
     progress=None,
 ) -> list[tuple[str, dict]]:
-    """Returns (symbol, raw bar) pairs between start and end (ISO UTC)."""
+    """Returns (symbol, raw bar) pairs between start and end (ISO UTC).
+    Crypto symbols contain a slash (BTC/USD) and use Alpaca's crypto endpoint."""
+    crypto = all("/" in x for x in symbols)
     s = session or requests.Session()
     headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
-    params = {
-        "symbols": ",".join(symbols), "timeframe": "1Min", "start": start, "end": end,
-        "limit": 10000, "feed": feed, "adjustment": "raw", "sort": "asc",
-    }
+    params = {"symbols": ",".join(symbols), "timeframe": "1Min", "start": start, "end": end,
+              "limit": 10000, "sort": "asc"}
+    if not crypto:
+        params.update(feed=feed, adjustment="raw")
+    url = ALPACA_CRYPTO_BARS_URL if crypto else ALPACA_BARS_URL
     out: list[tuple[str, dict]] = []
     for page in range(1, max_pages + 1):
-        resp = s.get(ALPACA_BARS_URL, headers=headers, params=params, timeout=TIMEOUT)
+        resp = s.get(url, headers=headers, params=params, timeout=TIMEOUT)
         if resp.status_code == 403 and "subscription" in resp.text.lower():
             raise SourceError(f"Alpaca says this data feed isn't on your plan ({feed}). "
-                              "Set intraday.feed to 'iex' in config.yaml.")
+                              "Set trench.feed to 'iex' in config.yaml.")
         _check(resp, "Alpaca bars")
         body = resp.json()
         for sym, bars in (body.get("bars") or {}).items():

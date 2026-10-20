@@ -2,9 +2,13 @@
 
     python -m signalbot.bot
 
-It only answers your chat (TELEGRAM_CHAT_ID). Anyone else who finds the bot gets
-told it's private. Prediction commands (/today, /odds, /log, /record) arrive in
-later phases; Phase 1 has /status, /refresh, /ping, and /help.
+Main commands (Trench mode):
+    /call NVDA   UP / DOWN / No trade, with a hold time of 1-5 minutes and the reasons
+    /scan        every Trench market right now; lists only the live setups
+    /tested      what the backtest says works, per market type and hold time
+
+Also: /today (next-day outlook), /status, /help. It only answers your chat
+(TELEGRAM_CHAT_ID); anyone else is told it's private.
 """
 
 from __future__ import annotations
@@ -29,14 +33,62 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("signalbot")
 
 COMMANDS = [
-    ("today", "Tomorrow's odds for the watchlist"),
-    ("odds", "Odds and key numbers for one stock, e.g. /odds NVDA"),
-    ("backtest", "Results of the last walk-forward backtest"),
+    ("call", "Trench call for one market, e.g. /call NVDA or /call btc"),
+    ("scan", "Check every Trench market for a setup right now"),
+    ("tested", "What the backtest says works, by market and hold time"),
+    ("today", "Next-day outlook (daily model)"),
     ("status", "What data the bot has"),
-    ("refresh", "Pull new data, rebuild features, rerun the model"),
-    ("ping", "Check the bot is alive"),
     ("help", "List commands"),
 ]
+
+_scorer = None
+
+
+def get_scorer():
+    """FinBERT, loaded once and kept in memory. None if it isn't installed."""
+    global _scorer
+    if _scorer is None:
+        try:
+            from .sentiment import finbert_scorer
+            _scorer = finbert_scorer()
+        except BaseException:
+            _scorer = False
+    return _scorer or None
+
+
+def tested_text(s: Settings) -> str:
+    import json
+    from .intraday import trench_settings
+    conn = db.connect(s.database_path)
+    try:
+        has = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='intraday_runs'").fetchone()
+        row = conn.execute("SELECT summary FROM intraday_runs ORDER BY id DESC LIMIT 1").fetchone() if has else None
+    finally:
+        conn.close()
+    if not row:
+        return "No Trench backtest yet. Run <code>python -m signalbot.intraday backtest</code>."
+    sm = json.loads(row[0])
+    t = trench_settings(s)
+    fee = f"{sm['fee_bps']:.1f} bps" if sm.get("fee_bps") is not None else "not set"
+    lines = [f"<b>Trench backtest</b> {escape(sm['start'])} → {escape(sm['end'])}",
+             f"{sm['multiplier']:g}x · fee {escape(fee)} · out-of-sample", ""]
+    for kind in ("stock", "crypto", "commodity"):
+        rows = sorted((v for v in sm["plan"].values() if v["kind"] == kind), key=lambda v: v["hold"])
+        if not rows:
+            continue
+        lines.append(f"<b>{kind}</b>")
+        for v in rows:
+            b = v.get("best")
+            if not b:
+                lines.append(f"  ⚪ {v['hold']} min: too few confident calls")
+                continue
+            mark = "🟢" if v["tradeable"] else "⚪"
+            lines.append(f"  {mark} {v['hold']} min: right {b['hit']:.0%}, {b['bps']:+.1f} bps, "
+                         f"{b['per_day']:.0f}/day, {b['bust_rate']:.1%} busts, max fee {b['max_fee_bps']:+.1f} bps")
+    lines += ["", "🟢 = the bot will make calls here. ⚪ = it says No trade."]
+    if sm.get("fee_bps") is None:
+        lines.append("Set trench.fee_bps in config.yaml from a real ticket, then rerun the backtest.")
+    return "\n".join(lines)
 
 
 def status_text(s: Settings) -> str:
@@ -184,7 +236,7 @@ def build_app(s: Settings) -> Application:
 
     async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         lines = [f"/{name} - {desc}" for name, desc in COMMANDS]
-        lines.append("\nComing later: /log, /record, /pause")
+        lines.append("\nMore: /odds TICKER, /backtest (daily model), /refresh, /ping")
         await update.message.reply_text("\n".join(lines))
 
     async def ping(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -196,7 +248,7 @@ def build_app(s: Settings) -> Application:
     async def refresh(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Refreshing data and rerunning the model. This takes a few minutes...")
         code = 0
-        steps = (("signalbot.refresh", ["--notify"]), ("signalbot.sentiment", []),
+        steps = (("signalbot.refresh", ["--notify"]), ("signalbot.intraday", ["refresh"]), ("signalbot.sentiment", []),
                  ("signalbot.features", []), ("signalbot.model", ["--quiet"]))
         for module, extra in steps:
             proc = await asyncio.create_subprocess_exec(
@@ -212,6 +264,50 @@ def build_app(s: Settings) -> Application:
 
     async def today(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(today_text(s), parse_mode=ParseMode.HTML)
+
+    async def call(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        from .intraday import format_call, live_call, load_models, resolve_ticker, trench_settings
+        t = trench_settings(s)
+        if not ctx.args:
+            await update.message.reply_text(f"Which market? e.g. /call NVDA\nYours: {', '.join(t.tickers)}")
+            return
+        tk = resolve_ticker(" ".join(ctx.args), t)
+        if tk is None:
+            await update.message.reply_text(f"Not one of your Trench markets: {', '.join(t.tickers)}")
+            return
+        art = load_models()
+        if art is None:
+            await update.message.reply_text("No trained models yet. Run: python -m signalbot.intraday backtest")
+            return
+        try:
+            c = await asyncio.to_thread(live_call, tk, s, t, art, scorer=get_scorer())
+            await update.message.reply_text(format_call(c, t, html=True), parse_mode=ParseMode.HTML)
+        except Exception as exc:
+            await update.message.reply_text(f"Couldn't make a call for {tk}: {exc}")
+
+    async def scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        from .intraday import format_call, live_call, load_models, trench_settings
+        t = trench_settings(s)
+        art = load_models()
+        if art is None:
+            await update.message.reply_text("No trained models yet. Run: python -m signalbot.intraday backtest")
+            return
+        await update.message.reply_text(f"Scanning {len(t.tickers)} markets...")
+        calls, quiet = [], []
+        for tk in t.tickers:
+            try:
+                c = await asyncio.to_thread(live_call, tk, s, t, art, scorer=get_scorer())
+            except Exception:
+                quiet.append(f"{tk} (error)")
+                continue
+            (calls if c.direction != "NONE" else quiet).append(c if c.direction != "NONE" else tk)
+        parts = [format_call(c, t, html=True) for c in calls] or ["<b>No setups right now.</b>"]
+        if quiet:
+            parts.append(f"⚪ No trade: {escape(', '.join(quiet))}")
+        await update.message.reply_text("\n\n".join(parts), parse_mode=ParseMode.HTML)
+
+    async def tested(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        await update.message.reply_text(tested_text(s), parse_mode=ParseMode.HTML)
 
     async def backtest(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(backtest_text(s), parse_mode=ParseMode.HTML)
@@ -235,6 +331,9 @@ def build_app(s: Settings) -> Application:
         app.add_handler(CommandHandler("today", today, filters=owner))
         app.add_handler(CommandHandler("odds", odds, filters=owner))
         app.add_handler(CommandHandler("backtest", backtest, filters=owner))
+        app.add_handler(CommandHandler("call", call, filters=owner))
+        app.add_handler(CommandHandler("scan", scan, filters=owner))
+        app.add_handler(CommandHandler("tested", tested, filters=owner))
         app.add_handler(CommandHandler("ping", ping, filters=owner))
         app.add_handler(CommandHandler("status", status, filters=owner))
         app.add_handler(CommandHandler("refresh", refresh, filters=owner))

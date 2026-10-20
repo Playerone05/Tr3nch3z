@@ -1,10 +1,53 @@
 # Tr3nch3z — Signal Bot
 
-A bot that estimates the chance each stock on your watchlist closes higher the next day, using price action, real news, and market context, and sends its calls to you on Telegram.
+A Telegram bot built for Trench.io-style trades: **up or down, held 1–5 minutes**, on stocks, crypto, and commodities. Ask `/call NVDA` and it answers **UP / DOWN / No trade** with a hold time and the reasons, using live minute prices, volume, market mood, and fresh headlines. It only makes calls in setups that held up in an honest backtest at your multiplier and fee.
 
-**Current stage: Phase 4 (walk-forward backtest).** The bot collects data, scores headlines with FinBERT, builds features, trains a calibrated model, and backtests four different questions quarter by quarter since 2021. `/backtest` shows which ones have a real, out-of-sample signal. Don't trade on anything that isn't 🟢 there.
+> Not financial advice. This is a learning project. 1–5 minute moves are mostly noise, so "No trade" is often the right answer.
 
-> Not financial advice. This is a learning project. Paper trade for months before risking real money, and never use high multipliers.
+## Trench mode (start here)
+
+```bash
+python -m signalbot.intraday refresh       # minute bars + news for every Trench market (first run: a few minutes)
+python -m signalbot.sentiment              # score the new headlines
+python -m signalbot.intraday backtest      # test every market type x hold time, then train the live models (~5-15 min)
+python -m signalbot.bot                    # then in Telegram: /call NVDA, /call btc, /scan, /tested
+```
+
+Rerun `refresh` + `backtest` about once a week so the models keep up with the market.
+
+**Set up for your trades in `config.yaml` → `trench:`**
+
+| Setting | What it is |
+|---|---|
+| `multiplier` | the multiplier you use; busts and per-trade results are computed at it |
+| `fee_bps` | Trench's fee per trade as basis points of the position. From a ticket: fee $ ÷ (stake $ × multiplier) × 10,000. Until it's set, the backtest shows the max fee each setup could survive. |
+| `entry_delay_min` | minutes between the alert and you placing the trade (default 1) |
+| `holds` | hold times the bot picks between (default 1, 2, 3, 5 min) |
+| `markets` | stocks, crypto (24/7), and commodities via ETFs that track them (GLD gold, SLV silver, USO oil; US market hours only) |
+
+**What a call looks like**
+
+```
+NVDA ⬆️ UP · hold 3 min
+   57% confident · enter now, close after 3 min
+   tested: right 55%, avg +1.4 bps, 0.0% busts at 25x, 12.0 calls/day
+   • volume vs normal 3.2x
+   • last 5 min +0.41%
+   • vs market (5 min) +0.30%
+   • news: "Nvidia supplier raises AI outlook" (4 min ago, tone +0.81)
+   price 182.40 at 1:52 PM CT
+```
+
+**How it stays honest**
+- Every backtest trade enters **1 minute after** the alert, like you would.
+- Quarterly-style walk-forward by week: each week is predicted by models trained only on the 6 weeks before it, with a gap.
+- The confidence bar for each market type and hold time is **picked on the first half** of the test weeks and **judged on the second half**. Without this, random data looked tradeable.
+- A setup is 🟢 only if its AUC is above 0.505, the low end of its 90% range beats your fee, and its average result per trade at your multiplier (busts included) is positive.
+- `tests/test_intraday.py`: a planted momentum edge is found; random data never gets a 🟢.
+
+---
+
+The daily model below (next-day direction, Phases 1–4) still runs and feeds `/today`.
 
 ---
 
@@ -95,6 +138,9 @@ To peek at the table: `python -m signalbot.features --show NVDA`
 | Terminal | `python -m signalbot.backtest` | Walk-forward backtest of all four questions |
 | Terminal | `python -m signalbot.bot` | Run the Telegram bot |
 | Terminal | `python -m pytest` | Run the tests (offline, fake data) |
+| Telegram | `/call NVDA` | Trench call: UP / DOWN / No trade, hold time, reasons |
+| Telegram | `/scan` | Every Trench market right now |
+| Telegram | `/tested` | Which market types and hold times have a tested edge |
 | Telegram | `/today` | Tomorrow's odds for the whole watchlist |
 | Telegram | `/odds NVDA` | One stock's odds plus its key numbers |
 | Telegram | `/backtest` | Which questions show a real out-of-sample signal |
@@ -192,7 +238,9 @@ signalbot/
   sentiment.py         FinBERT headline scoring
   features.py          builds the feature table
   model.py             trains, checks, and runs the model
-  backtest.py          walk-forward backtest of four questions
+  backtest.py          walk-forward backtest of four questions (daily)
+  intraday.py          Trench mode: minute features, 1-5 min backtest, live calls
+  sources/bars.py      Alpaca minute bars (stocks + crypto)
   bot.py               Telegram bot
   chat_id.py           finds your Telegram chat ID
   notify.py            one-off Telegram messages

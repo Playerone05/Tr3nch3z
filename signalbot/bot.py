@@ -20,6 +20,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 from . import db
 from .config import ROOT, Settings, load_settings
 from .notify import escape
+from .model import CALL_DOWN, CALL_UP, call_label
 from .sentiment import coverage as sentiment_coverage
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
@@ -28,8 +29,10 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("signalbot")
 
 COMMANDS = [
+    ("today", "Tomorrow's odds for the watchlist"),
+    ("odds", "Odds and key numbers for one stock, e.g. /odds NVDA"),
     ("status", "What data the bot has"),
-    ("refresh", "Pull the latest prices and news"),
+    ("refresh", "Pull new data, rebuild features, rerun the model"),
     ("ping", "Check the bot is alive"),
     ("help", "List commands"),
 ]
@@ -61,6 +64,77 @@ def status_text(s: Settings) -> str:
     ])
 
 
+UNTESTED = "<i>Phase 3: not backtested yet. Don't trade on these.</i>"
+
+
+def _latest_predictions(conn):
+    has = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='predictions'").fetchone()
+    if not has:
+        return None, []
+    day = conn.execute("SELECT MAX(date) FROM predictions").fetchone()[0]
+    rows = conn.execute(
+        "SELECT ticker, p_up, model FROM predictions WHERE date = ? ORDER BY p_up DESC", (day,)
+    ).fetchall()
+    return day, rows
+
+
+def today_text(s: Settings) -> str:
+    conn = db.connect(s.database_path)
+    try:
+        day, rows = _latest_predictions(conn)
+    finally:
+        conn.close()
+    if not rows:
+        return "No predictions yet. Run <code>python -m signalbot.model</code> or send /refresh."
+    calls = [(t, p) for t, p, _ in rows if p >= CALL_UP or p <= CALL_DOWN]
+    lines = [f"<b>Odds for the session after {escape(day)}</b>",
+             f"{len(calls)} call{'s' if len(calls) != 1 else ''}, {len(rows) - len(calls)} no-call", ""]
+    for t, p, _ in rows:
+        mark = "🟢" if p >= CALL_UP else "🔴" if p <= CALL_DOWN else "⚪"
+        lines.append(f"{mark} <code>{escape(t):<5} {p:5.1%}</code>  {call_label(p)}")
+    lines += ["", f"Model: {escape(rows[0][2])}", UNTESTED]
+    return "\n".join(lines)
+
+
+ODDS_COLUMNS = [
+    ("ret_1d", "Today's move", "{:+.1%}"), ("ret_5d", "5-day move", "{:+.1%}"),
+    ("rsi_14", "RSI-14", "{:.0f}"), ("dist_sma20", "vs 20-day avg", "{:+.1%}"),
+    ("vol_ratio_20", "Volume vs avg", "{:.1f}x"), ("rel_sector_5d", "vs sector (5d)", "{:+.1%}"),
+    ("news_n", "Headlines today", "{:.0f}"), ("news_sent", "News sentiment", "{:+.2f}"),
+    ("earn_next", "Earnings reaction next", "{:.0f}"), ("vix", "VIX", "{:.1f}"),
+]
+
+
+def odds_text(s: Settings, ticker: str) -> str:
+    ticker = ticker.upper().strip()
+    if ticker not in s.watchlist:
+        return f"{escape(ticker)} isn't on the watchlist. Add it to config.yaml first."
+    conn = db.connect(s.database_path)
+    try:
+        day, rows = _latest_predictions(conn)
+        hit = next((r for r in rows if r[0] == ticker), None)
+        cols = ", ".join(c for c, _, _ in ODDS_COLUMNS)
+        feat = conn.execute(
+            f"SELECT {cols} FROM features WHERE ticker = ? AND date = ?", (ticker, day)
+        ).fetchone() if day else None
+    finally:
+        conn.close()
+    if not hit:
+        return "No prediction for that stock yet. Run <code>python -m signalbot.model</code>."
+    p = hit[1]
+    lines = [f"<b>{escape(ticker)}: {p:.1%} chance up</b> after {escape(day)} · {call_label(p)}", ""]
+    if feat:
+        for (col, label, fmt), v in zip(ODDS_COLUMNS, feat):
+            if v is None:
+                continue
+            if col == "earn_next":
+                lines.append(f"{label}: {'yes' if v else 'no'}")
+            else:
+                lines.append(f"{label}: {fmt.format(v)}")
+    lines += ["", UNTESTED]
+    return "\n".join(lines)
+
+
 def build_app(s: Settings) -> Application:
     app = Application.builder().token(s.telegram_bot_token).build()
     owner = filters.Chat(chat_id=int(s.telegram_chat_id)) if s.telegram_chat_id else None
@@ -79,7 +153,7 @@ def build_app(s: Settings) -> Application:
 
     async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         lines = [f"/{name} - {desc}" for name, desc in COMMANDS]
-        lines.append("\nComing later: /today, /odds TICKER, /log, /record, /pause")
+        lines.append("\nComing later: /log, /record, /pause")
         await update.message.reply_text("\n".join(lines))
 
     async def ping(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -89,9 +163,11 @@ def build_app(s: Settings) -> Application:
         await update.message.reply_text(status_text(s), parse_mode=ParseMode.HTML)
 
     async def refresh(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        await update.message.reply_text("Refreshing data. This can take a few minutes on the first run...")
+        await update.message.reply_text("Refreshing data and rerunning the model. This takes a few minutes...")
         code = 0
-        for module, extra in (("signalbot.refresh", ["--notify"]), ("signalbot.features", [])):
+        steps = (("signalbot.refresh", ["--notify"]), ("signalbot.sentiment", []),
+                 ("signalbot.features", []), ("signalbot.model", ["--quiet"]))
+        for module, extra in steps:
             proc = await asyncio.create_subprocess_exec(
                 sys.executable, "-m", module, *extra,
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, cwd=str(ROOT),
@@ -100,6 +176,17 @@ def build_app(s: Settings) -> Application:
             code = code or rc
         if code != 0:
             await update.message.reply_text("Refresh finished with errors. Run it in the terminal to see details.")
+        else:
+            await update.message.reply_text(today_text(s), parse_mode=ParseMode.HTML)
+
+    async def today(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        await update.message.reply_text(today_text(s), parse_mode=ParseMode.HTML)
+
+    async def odds(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not ctx.args:
+            await update.message.reply_text("Which stock? For example: /odds NVDA")
+            return
+        await update.message.reply_text(odds_text(s, ctx.args[0]), parse_mode=ParseMode.HTML)
 
     async def unknown(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("I don't know that one yet. Send /help.")
@@ -111,6 +198,8 @@ def build_app(s: Settings) -> Application:
     app.add_handler(CommandHandler("start", start))
     if owner is not None:
         app.add_handler(CommandHandler("help", help_cmd, filters=owner))
+        app.add_handler(CommandHandler("today", today, filters=owner))
+        app.add_handler(CommandHandler("odds", odds, filters=owner))
         app.add_handler(CommandHandler("ping", ping, filters=owner))
         app.add_handler(CommandHandler("status", status, filters=owner))
         app.add_handler(CommandHandler("refresh", refresh, filters=owner))

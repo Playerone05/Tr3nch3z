@@ -2,7 +2,7 @@
 
 A bot that estimates the chance each stock on your watchlist closes higher the next day, using price action, real news, and market context, and sends its calls to you on Telegram.
 
-**Current stage: Phase 2 (features + news sentiment).** The bot collects data, scores headlines with FinBERT, and builds the table the model will learn from. Predictions arrive in Phase 3.
+**Current stage: Phase 3 (first model).** The bot collects data, scores headlines with FinBERT, builds features, trains a calibrated model, and answers `/today` and `/odds` in Telegram. The numbers are **not backtested yet** (that's Phase 4), so don't trade on them.
 
 > Not financial advice. This is a learning project. Paper trade for months before risking real money, and never use high multipliers.
 
@@ -66,8 +66,11 @@ The first line installs PyTorch's CPU-only build (~200 MB instead of 2+ GB).
 python -m signalbot.refresh       # 1. pull new prices, news, earnings
 python -m signalbot.sentiment     # 2. score new headlines with FinBERT
 python -m signalbot.features      # 3. rebuild the feature table
+python -m signalbot.model         # 4. check the model, retrain, predict tomorrow
 python -m signalbot.bot           # run the Telegram bot (leave it running)
 ```
+
+Run steps 1–4 **after the market closes** (4:15 PM ET / 3:15 PM Central). Before that, today's prices are still moving and the odds aren't final. Or just send `/refresh` in Telegram, which runs all four.
 
 The first `sentiment` run downloads the model (~440 MB) and scores every stored headline, which can take 10–20 minutes on a laptop. It saves as it goes, so Ctrl+C is safe; the next run picks up where it stopped. After that, each run takes seconds.
 
@@ -82,10 +85,13 @@ To peek at the table: `python -m signalbot.features --show NVDA`
 | Terminal | `python -m signalbot.refresh --notify` | Also send a summary to Telegram |
 | Terminal | `python -m signalbot.sentiment` | Score unscored headlines (`--limit 200` for a quick test) |
 | Terminal | `python -m signalbot.features --show NVDA` | Build features, print NVDA's latest rows |
+| Terminal | `python -m signalbot.model` | Held-out check, retrain, store tomorrow's odds |
 | Terminal | `python -m signalbot.bot` | Run the Telegram bot |
 | Terminal | `python -m pytest` | Run the tests (offline, fake data) |
+| Telegram | `/today` | Tomorrow's odds for the whole watchlist |
+| Telegram | `/odds NVDA` | One stock's odds plus its key numbers |
 | Telegram | `/status` | Data, sentiment, and feature coverage |
-| Telegram | `/refresh` | Pull new data and rebuild features from your phone |
+| Telegram | `/refresh` | Pull data, score news, rebuild features, rerun the model |
 | Telegram | `/ping`, `/help` | Health check, command list |
 
 The bot only answers your chat (`TELEGRAM_CHAT_ID`). Anyone else gets "This bot is private."
@@ -118,6 +124,28 @@ News features are blank (unknown) before the news history starts, and zero on qu
 - An earnings report after Wednesday's close is flagged on **Wednesday's** row, because Thursday's move is the reaction. The date is on the calendar in advance, so this isn't peeking.
 - `tests/test_features.py` multiplies all future prices by 3 and checks that no past feature changes.
 
+## The model (Phase 3)
+
+`python -m signalbot.model` does five things:
+
+1. **Holds out** the last 120 trading days. The model never trains on them.
+2. **Trains two price + market models** (logistic regression and gradient-boosted trees) on everything before that, with 5-day gaps so nothing bleeds across, then **calibrates** them on a separate 120-day window so "60%" means up about 60% of the time.
+3. **Tests a news add-on** on top of the better model, trained only on days with news. It's switched on only if it beats the plain model in at least 90% of bootstrap resamples of the test days, so it can't win by luck.
+4. **Shuffle check:** retrains with random labels. That version must not beat "always guess the common direction," or something is leaking.
+5. **Retrains the winner on all data** and stores tomorrow's odds for `/today` and `/odds`.
+
+How to read the report:
+
+| Column | Meaning |
+|---|---|
+| accuracy | how often the model picked the right direction on held-out days |
+| always up | how often just guessing "up" was right in that window (the base rate) |
+| edge | accuracy minus the better of always-up / always-down, in points. **This is the number that matters.** |
+| vs base | log-loss improvement over predicting the base rate every day; positive is better |
+| calls / call acc | predictions at 58%+ or 42%- and how often those were right |
+
+A single 120-day window is a small sample: a few points of edge either way can be luck. Phase 4 replays every past year to find out.
+
 ## Project layout
 
 ```
@@ -132,6 +160,7 @@ signalbot/
   sources/             Yahoo prices, Alpaca + Finnhub news, Finnhub earnings
   sentiment.py         FinBERT headline scoring
   features.py          builds the feature table
+  model.py             trains, checks, and runs the model
   bot.py               Telegram bot
   chat_id.py           finds your Telegram chat ID
   notify.py            one-off Telegram messages
@@ -141,8 +170,8 @@ tests/                 runs offline with fake data
 ## Roadmap
 
 1. ~~Data pipeline~~
-2. **Features & sentiment** ← you are here
-3. First model: logistic regression → LightGBM, calibrated probabilities
+2. ~~Features & sentiment~~
+3. **First model** ← you are here
 4. Honest backtest: walk-forward testing, leakage checks, scorecard vs. the base rate
 5. Paper trading: nightly run, `/today`, `/odds`, `/log`, `/record` commands, 3+ months of logged calls
 6. Report & polish: AI news summaries, dashboard, portfolio write-up

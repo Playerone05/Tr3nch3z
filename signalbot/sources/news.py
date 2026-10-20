@@ -43,8 +43,14 @@ def fetch_alpaca_news(
     session: requests.Session | None = None,
     max_pages: int = 400,
     pause: float = 0.35,
+    on_batch=None,
+    progress=print,
 ) -> list[dict]:
-    """All stories tagged with any of `symbols` between start and end (ISO UTC)."""
+    """All stories tagged with any of `symbols` between start and end (ISO UTC).
+
+    on_batch(items) is called after each page so callers can save as they go;
+    stopping partway keeps everything fetched so far.
+    """
     s = session or requests.Session()
     headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
     params = {
@@ -56,16 +62,25 @@ def fetch_alpaca_news(
         "include_content": "false",
     }
     items: list[dict] = []
-    for _ in range(max_pages):
+    for page in range(1, max_pages + 1):
         resp = s.get(ALPACA_NEWS_URL, headers=headers, params=params, timeout=TIMEOUT)
         _check(resp, "Alpaca News")
         body = resp.json()
-        items.extend(body.get("news", []))
+        batch = body.get("news", [])
+        items.extend(batch)
+        if on_batch and batch:
+            on_batch(batch)
+        if progress and (page % 10 == 0 or not body.get("next_page_token")):
+            latest = (batch[-1].get("created_at") or "")[:10] if batch else ""
+            progress(f"  alpaca: page {page}, {len(items)} stories so far (up to {latest})")
         token = body.get("next_page_token")
         if not token:
             break
         params["page_token"] = token
         time.sleep(pause)
+    else:
+        if progress:
+            progress(f"  alpaca: stopped at {max_pages} pages; the next refresh continues from here")
     return items
 
 

@@ -97,17 +97,27 @@ def refresh_news(
 
     if s.has_alpaca:
         start, end = _news_window(conn, "alpaca", s.news_lookback_days)
-        raw = fetch_alpaca(s.watchlist, iso_utc(start), iso_utc(end), s.alpaca_api_key, s.alpaca_secret_key)
-        rows = prepare_news(news_src.parse_alpaca_news(raw, s.watchlist), days, s.market_timezone, s.news_cutoff)
-        n = db.insert_news(conn, rows)
-        results.append(StepResult("news:alpaca", n, "ok", f"{len(raw)} stories since {start.date()}"))
+        print(f"  alpaca: fetching news since {start.date()} (first run takes a few minutes)", flush=True)
+        saved = 0
+
+        def save(batch):
+            nonlocal saved
+            rows = prepare_news(news_src.parse_alpaca_news(batch, s.watchlist), days, s.market_timezone, s.news_cutoff)
+            saved += db.insert_news(conn, rows)
+
+        raw = fetch_alpaca(
+            s.watchlist, iso_utc(start), iso_utc(end), s.alpaca_api_key, s.alpaca_secret_key,
+            on_batch=save, progress=lambda m: print(m, flush=True),
+        )
+        results.append(StepResult("news:alpaca", saved, "ok", f"{len(raw)} stories since {start.date()}"))
     else:
         results.append(StepResult("news:alpaca", 0, "skipped", "ALPACA_API_KEY / ALPACA_SECRET_KEY not set"))
 
     if s.has_finnhub:
         start, end = _news_window(conn, "finnhub", s.news_lookback_days)
         total_raw, total_new = 0, 0
-        for ticker in s.watchlist:
+        for i, ticker in enumerate(s.watchlist, 1):
+            print(f"  finnhub: {ticker} ({i}/{len(s.watchlist)})", flush=True)
             raw = fetch_finnhub(ticker, start.date(), end.date(), s.finnhub_api_key)
             total_raw += len(raw)
             rows = prepare_news(news_src.parse_finnhub_news(raw, ticker), days, s.market_timezone, s.news_cutoff)

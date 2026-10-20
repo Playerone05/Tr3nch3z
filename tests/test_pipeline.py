@@ -20,13 +20,18 @@ def fake_prices(tickers, start):
     return pd.DataFrame(rows)
 
 
-def fake_alpaca(symbols, start, end, key, secret):
-    return [
+def fake_alpaca(symbols, start, end, key, secret, on_batch=None, progress=None):
+    items = [
         # Same story twice; the earlier copy should win.
         {"headline": "NVDA beats estimates!", "created_at": "2026-10-15T21:05:00Z", "symbols": ["NVDA"]},
         {"headline": "nvda beats estimates", "created_at": "2026-10-15T20:30:00Z", "symbols": ["NVDA"]},
         {"headline": "Weekend chip feature", "created_at": "2026-10-17T15:00:00Z", "symbols": ["NVDA", "AMD"]},
     ]
+    # Deliver in two "pages" like the real API, saving after each.
+    if on_batch:
+        on_batch(items[:1])
+        on_batch(items[1:])
+    return items
 
 
 def fake_finnhub(symbol, start, end, token):

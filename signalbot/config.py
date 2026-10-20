@@ -57,7 +57,8 @@ def _env(name: str) -> str | None:
 
 
 def load_settings(config_path: str | Path | None = None) -> Settings:
-    load_dotenv(ROOT / ".env")
+    # override=True: values in .env win over leftover (possibly empty) shell variables.
+    load_dotenv(ROOT / ".env", override=True)
     path = Path(config_path) if config_path else ROOT / "config.yaml"
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
